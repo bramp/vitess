@@ -17,21 +17,26 @@ limitations under the License.
 package sqlparser
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/youtube/vitess/go/bytes2"
 	"github.com/youtube/vitess/go/sqltypes"
 )
 
-const eofChar = 0x100
+const (
+	defaultBufSize = 4096
+	eofChar        = 0x100
+)
 
 // Tokenizer is the struct used to generate SQL
 // tokens for the parser.
 type Tokenizer struct {
-	InStream      *strings.Reader
+	InStream      io.Reader
 	AllowComments bool
 	ForceEOF      bool
 	lastChar      uint16
@@ -43,12 +48,25 @@ type Tokenizer struct {
 	partialDDL    *DDL
 	nesting       int
 	multi         bool
+
+	buf     []byte
+	bufPos  int
+	bufSize int
 }
 
 // NewStringTokenizer creates a new Tokenizer for the
 // sql string.
 func NewStringTokenizer(sql string) *Tokenizer {
-	return &Tokenizer{InStream: strings.NewReader(sql)}
+	return NewTokenizer(strings.NewReader(sql))
+}
+
+// NewTokenizer creates a new Tokenizer reading a sql
+// string from the io.Reader.
+func NewTokenizer(r io.Reader) *Tokenizer {
+	return &Tokenizer{
+		InStream: bufio.NewReader(r),
+		buf:      make([]byte, defaultBufSize),
+	}
 }
 
 // keywords is a map of mysql keywords that fall into two categories:
@@ -685,18 +703,44 @@ exit:
 }
 
 func (tkn *Tokenizer) scanString(delim uint16, typ int) (int, []byte) {
-	buffer := &bytes2.Buffer{}
+	var buffer bytes2.Buffer
 	for {
 		ch := tkn.lastChar
-		tkn.next()
-		if ch == delim {
-			if tkn.lastChar == delim {
-				tkn.next()
-			} else {
-				break
+		if ch == eofChar {
+			// Unterminated string.
+			return LEX_ERROR, buffer.Bytes()
+		}
+
+		if ch != delim && ch != '\\' {
+			buffer.WriteByte(byte(ch))
+
+			// Scan ahead to the next interesting character.
+			start := tkn.bufPos
+			for ; tkn.bufPos < tkn.bufSize; tkn.bufPos++ {
+				ch = uint16(tkn.buf[tkn.bufPos])
+				if ch == delim || ch == '\\' {
+					break
+				}
 			}
-		} else if ch == '\\' {
+
+			buffer.Write(tkn.buf[start:tkn.bufPos])
+			tkn.Position += (tkn.bufPos - start)
+
+			if tkn.bufPos >= tkn.bufSize {
+				// Reached the end of the buffer without finding a delim or
+				// escape character.
+				tkn.next()
+				continue
+			}
+
+			tkn.bufPos++
+			tkn.Position++
+		}
+		tkn.next() // Read one past the delim or escape character.
+
+		if ch == '\\' {
 			if tkn.lastChar == eofChar {
+				// String terminates mid escape character.
 				return LEX_ERROR, buffer.Bytes()
 			}
 			if decodedChar := sqltypes.SQLDecodeMap[byte(tkn.lastChar)]; decodedChar == sqltypes.DontEscape {
@@ -704,13 +748,16 @@ func (tkn *Tokenizer) scanString(delim uint16, typ int) (int, []byte) {
 			} else {
 				ch = uint16(decodedChar)
 			}
-			tkn.next()
+
+		} else if ch == delim && tkn.lastChar != delim {
+			// Correctly terminated string, which is not a double delim.
+			break
 		}
-		if ch == eofChar {
-			return LEX_ERROR, buffer.Bytes()
-		}
+
 		buffer.WriteByte(byte(ch))
+		tkn.next()
 	}
+
 	return typ, buffer.Bytes()
 }
 
@@ -757,13 +804,23 @@ func (tkn *Tokenizer) consumeNext(buffer *bytes2.Buffer) {
 }
 
 func (tkn *Tokenizer) next() {
-	if ch, err := tkn.InStream.ReadByte(); err != nil {
-		// Only EOF is possible.
-		tkn.lastChar = eofChar
+	if tkn.bufPos >= tkn.bufSize {
+		var err error
+		tkn.bufPos = 0
+		if tkn.bufSize, err = tkn.InStream.Read(tkn.buf); err != io.EOF && err != nil {
+			tkn.LastError = err
+		}
+	}
+	if tkn.bufSize > 0 {
+		tkn.lastChar = uint16(tkn.buf[tkn.bufPos])
+		tkn.bufPos++
 	} else {
-		tkn.lastChar = uint16(ch)
+		tkn.lastChar = eofChar
 	}
 	tkn.Position++
+	// TODO(bramp) Move tkn.Position++, so it only increments if a char was read.
+	// Many of the test examples, have incorrect "syntax error at position N", due
+	// to calling next() multiple times after EOF.
 }
 
 // reset clears any internal state.
