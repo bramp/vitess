@@ -17,12 +17,10 @@ limitations under the License.
 package sqlparser
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/youtube/vitess/go/bytes2"
 	"github.com/youtube/vitess/go/sqltypes"
@@ -57,14 +55,18 @@ type Tokenizer struct {
 // NewStringTokenizer creates a new Tokenizer for the
 // sql string.
 func NewStringTokenizer(sql string) *Tokenizer {
-	return NewTokenizer(strings.NewReader(sql))
+	buf := []byte(sql)
+	return &Tokenizer{
+		buf:     buf,
+		bufSize: len(buf),
+	}
 }
 
 // NewTokenizer creates a new Tokenizer reading a sql
 // string from the io.Reader.
 func NewTokenizer(r io.Reader) *Tokenizer {
 	return &Tokenizer{
-		InStream: bufio.NewReader(r),
+		InStream: r,
 		buf:      make([]byte, defaultBufSize),
 	}
 }
@@ -807,8 +809,12 @@ func (tkn *Tokenizer) next() {
 	if tkn.bufPos >= tkn.bufSize {
 		var err error
 		tkn.bufPos = 0
-		if tkn.bufSize, err = tkn.InStream.Read(tkn.buf); err != io.EOF && err != nil {
-			tkn.LastError = err
+		if tkn.InStream == nil {
+			tkn.bufSize = 0
+		} else {
+			if tkn.bufSize, err = tkn.InStream.Read(tkn.buf); err != io.EOF && err != nil {
+				tkn.LastError = err
+			}
 		}
 	}
 	if tkn.bufSize > 0 {
