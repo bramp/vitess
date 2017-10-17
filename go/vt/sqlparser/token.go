@@ -558,12 +558,34 @@ func (tkn *Tokenizer) skipBlank() {
 }
 
 func (tkn *Tokenizer) scanIdentifier(firstByte byte) (int, []byte) {
-	buffer := &bytes2.Buffer{}
+	var buffer bytes2.Buffer
 	buffer.WriteByte(firstByte)
+
 	for isLetter(tkn.lastChar) || isDigit(tkn.lastChar) {
+		//fmt.Printf("last: %c\n", tkn.lastChar)
 		buffer.WriteByte(byte(tkn.lastChar))
+
+		// Scan ahead to the next interesting character.
+		start := tkn.bufPos
+		for ; tkn.bufPos < tkn.bufSize; tkn.bufPos++ {
+			tkn.lastChar = uint16(tkn.buf[tkn.bufPos])
+			if !isLetter(tkn.lastChar) && !isDigit(tkn.lastChar) {
+				break
+			}
+		}
+
+		buffer.Write(tkn.buf[start:tkn.bufPos])
+		tkn.Position += (tkn.bufPos - start)
+
+		if tkn.bufPos >= tkn.bufSize {
+			// Reached the end of the buffer without finishing the identifer
+			tkn.next()
+			continue
+		}
+
 		tkn.next()
 	}
+
 	lowered := bytes.ToLower(buffer.Bytes())
 	loweredStr := string(lowered)
 	if keywordID, found := keywords[loweredStr]; found {
